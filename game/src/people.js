@@ -1,149 +1,211 @@
-// People on foot: pedestrians who stroll the sidewalks and flee from danger,
-// and Bay PD officers who chase the player on foot when the heat is on.
+// Pedestrians strolling the sidewalks and foot officers chasing the
+// player. People are small stylised figures with swinging legs; officers
+// wear navy and a cap and can grab the player into an arrest.
 import * as THREE from 'three';
-import { PED_NAMES, CITY_HALF, nearestRoad } from './config.js';
-import { resolveBuilding } from './city.js';
+import { CFG, PED_NAMES, SHIRT_COLORS, SKIN_TONES } from './config.js';
+import { nearestRoad } from './city.js';
 
-const SHIRT_COLORS = [0xe74c3c, 0x3498db, 0x2ecc71, 0xf39c12, 0x9b59b6, 0x1abc9c, 0xecf0f1, 0xfd79a8];
-const SKIN_COLORS = [0xf1c27d, 0xe0ac69, 0xc68642, 0x8d5524, 0xffdbac];
-
-export function makePersonMesh(shirt, skin, isCop) {
-  const g = new THREE.Group();
-  const body = new THREE.Mesh(
-    new THREE.BoxGeometry(0.62, 0.85, 0.36),
-    new THREE.MeshLambertMaterial({ color: isCop ? 0x1c2f4a : shirt }),
-  );
-  body.position.y = 0.95;
-  g.add(body);
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.26, 10, 8),
-    new THREE.MeshLambertMaterial({ color: skin }),
-  );
+function buildFigure({ shirt, skin, hat, isOfficer }) {
+  const group = new THREE.Group();
+  const shirtMat = new THREE.MeshLambertMaterial({ color: shirt });
+  const skinMat = new THREE.MeshLambertMaterial({ color: skin });
+  const legMat = new THREE.MeshLambertMaterial({ color: isOfficer ? 0x1a2440 : 0x2e3440 });
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.62, 0.32), shirtMat);
+  torso.position.y = 1.12;
+  group.add(torso);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.21, 10, 10), skinMat);
   head.position.y = 1.62;
-  g.add(head);
-  if (isCop) {
-    const hat = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.28, 0.3, 0.14, 10),
-      new THREE.MeshLambertMaterial({ color: 0x0e1a2a }),
-    );
-    hat.position.y = 1.84;
-    g.add(hat);
-  } else {
-    const hair = new THREE.Mesh(
-      new THREE.SphereGeometry(0.27, 10, 6, 0, Math.PI * 2, 0, Math.PI / 2),
-      new THREE.MeshLambertMaterial({ color: 0x2d1a0e }),
-    );
+  group.add(head);
+  if (hat === 'cap') {
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.23, 0.1, 10),
+      new THREE.MeshLambertMaterial({ color: isOfficer ? 0x10203f : 0x333333 }));
+    cap.position.y = 1.78;
+    group.add(cap);
+  } else if (hat === 'hair') {
+    const hair = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 10, 0, Math.PI * 2, 0, Math.PI / 2),
+      new THREE.MeshLambertMaterial({ color: 0x1a1210 }));
     hair.position.y = 1.66;
-    g.add(hair);
+    group.add(hair);
   }
-  const legMat = new THREE.MeshLambertMaterial({ color: isCop ? 0x101c2c : 0x2c3e50 });
-  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.55, 0.24), legMat);
-  legL.position.set(-0.16, 0.28, 0);
-  legL.name = 'legL';
-  g.add(legL);
-  const legR = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.55, 0.24), legMat);
-  legR.position.set(0.16, 0.28, 0);
-  legR.name = 'legR';
-  g.add(legR);
-  g.userData.legL = legL;
-  g.userData.legR = legR;
-  return g;
+  const armGeo = new THREE.BoxGeometry(0.13, 0.55, 0.13);
+  const armL = new THREE.Mesh(armGeo, shirtMat);
+  armL.position.set(-0.36, 1.12, 0);
+  group.add(armL);
+  const armR = new THREE.Mesh(armGeo, shirtMat);
+  armR.position.set(0.36, 1.12, 0);
+  group.add(armR);
+  const legGeo = new THREE.BoxGeometry(0.17, 0.55, 0.17);
+  const legL = new THREE.Mesh(legGeo, legMat);
+  legL.position.set(-0.14, 0.55, 0);
+  group.add(legL);
+  const legR = new THREE.Mesh(legGeo, legMat);
+  legR.position.set(0.14, 0.55, 0);
+  group.add(legR);
+  return { group, armL, armR, legL, legR, torso };
 }
 
-export function spawnPedestrians(scene, rng, pedSpawns, count) {
-  const peds = [];
-  for (let i = 0; i < count; i += 1) {
-    const s = rng.pick(pedSpawns);
-    const mesh = makePersonMesh(rng.pick(SHIRT_COLORS), rng.pick(SKIN_COLORS), false);
-    const x = s.x + rng.range(-6, 6);
-    const z = s.z + rng.range(-6, 6);
-    mesh.position.set(x, 0, z);
-    scene.add(mesh);
-    peds.push({
-      mesh, x, z, angle: rng.range(0, Math.PI * 2), speed: rng.range(1.1, 2.1),
-      name: rng.pick(PED_NAMES), state: 'walk', panic: 0, walkPhase: rng.range(0, 6),
-      targetX: x, targetZ: z, health: 100, isCop: false, dead: false,
-    });
+function randomSidewalkTarget(rng) {
+  const along = rng.range(-200, 200);
+  const cross = rng.pick([-180, -120, -60, 0, 60, 120, 180]);
+  if (rng.chance(0.5)) return { x: along, z: cross + rng.pick([-8.5, 8.5]) };
+  return { x: cross + rng.pick([-8.5, 8.5]), z: along };
+}
+
+export function createPeople(scene, rng) {
+  const people = { peds: [], officers: [] };
+
+  for (let i = 0; i < 26; i += 1) {
+    const skin = rng.pick(SKIN_TONES);
+    const shirt = rng.pick(SHIRT_COLORS);
+    const hat = rng.chance(0.4) ? 'hair' : 'cap';
+    const { group, armL, armR, legL, legR, torso } = buildFigure({ shirt, skin, hat, isOfficer: false });
+    const spot = randomSidewalkTarget(rng);
+    group.position.set(spot.x, 0, spot.z);
+    scene.add(group);
+    const ped = {
+      group, armL, armR, legL, legR, torso,
+      pos: group.position,
+      yaw: rng.range(0, Math.PI * 2),
+      speed: rng.range(1, 2),
+      target: randomSidewalkTarget(rng),
+      panic: 0,
+      panicT: 0,
+      health: 100,
+      name: rng.pick(PED_NAMES),
+      swing: rng.range(0, Math.PI * 2),
+      dead: false,
+    };
+    torso.userData.pedRef = ped;
+    people.peds.push(ped);
   }
-  return peds;
+  return people;
 }
 
-function pickSidewalkTarget(ped, rng) {
-  // Walk along the nearest road, on the sidewalk edge.
-  const road = nearestRoad(ped.z);
-  const along = rng.range(-CITY_HALF, CITY_HALF);
-  if (Math.random() < 0.5) return { x: along, z: road + 8.5 };
-  const roadX = nearestRoad(ped.x);
-  return { x: roadX + 8.5, z: along };
+export function spawnOfficer(scene, x, z) {  const { group, armL, armR, legL, legR, torso } = buildFigure({
+    shirt: 0x1a2440, skin: 0xf2c89b, hat: 'cap', isOfficer: true,
+  });
+  group.position.set(x, 0, z);
+  scene.add(group);
+  const officer = {
+    group, armL, armR, legL, legR, torso,
+    pos: group.position,
+    yaw: 0,
+    speed: 5.4,
+    health: 60,
+    arrestT: 0,
+    swing: 0,
+    dead: false,
+  };
+  torso.userData.officerRef = officer;
+  return officer;
 }
 
-export function updatePedestrians(peds, dt, colliders, danger, rng) {
-  for (const ped of peds) {
+// Pedestrians walk between random sidewalk targets. When danger is near
+// — the player is wanted or recently fired a weapon — within 22 m, they
+// panic for three seconds and flee at 5.2 m/s.
+export function updatePedestrians(people, rng, dt, danger) {
+  for (const ped of people.peds) {
     if (ped.dead) continue;
-    ped.walkPhase += dt * 6;
-    const distDanger = danger ? Math.hypot(ped.x - danger.x, ped.z - danger.z) : 999;
-    if (distDanger < 22) ped.panic = Math.max(ped.panic, 3);
+    let speed = ped.speed;
+    let tx = ped.target.x;
+    let tz = ped.target.z;
+    if (danger && danger.active) {
+      const dx = ped.pos.x - danger.x;
+      const dz = ped.pos.z - danger.z;
+      const d = Math.hypot(dx, dz);
+      if (d < 22) {
+        ped.panic = 3;
+        ped.panicT = 3;
+      }
+    }
     if (ped.panic > 0) {
       ped.panic -= dt;
-      ped.state = 'flee';
-    } else if (Math.hypot(ped.targetX - ped.x, ped.targetZ - ped.z) < 2) {
-      const t = pickSidewalkTarget(ped, rng);
-      ped.targetX = t.x; ped.targetZ = t.z;
-      ped.state = 'walk';
+      speed = 5.2;
+      if (danger) {
+        const dx = ped.pos.x - danger.x;
+        const dz = ped.pos.z - danger.z;
+        const d = Math.hypot(dx, dz) || 1;
+        tx = ped.pos.x + (dx / d) * 30;
+        tz = ped.pos.z + (dz / d) * 30;
+      }
     }
-    const speed = ped.state === 'flee' ? 5.2 : ped.speed;
-    const dx = ped.targetX - ped.x;
-    const dz = ped.targetZ - ped.z;
-    const dist = Math.hypot(dx, dz);
-    let mx = 0; let mz = 0;
-    if (ped.state === 'flee') {
-      mx = (ped.x - danger.x) / Math.max(1, distDanger);
-      mz = (ped.z - danger.z) / Math.max(1, distDanger);
-    } else if (dist > 0.5) {
-      mx = dx / dist; mz = dz / dist;
+    const dx = tx - ped.pos.x;
+    const dz = tz - ped.pos.z;
+    const d = Math.hypot(dx, dz);
+    if (d < 1.5 && ped.panic <= 0) {
+      ped.target = randomSidewalkTarget(rng);
+    } else if (d > 0.01) {
+      ped.yaw = Math.atan2(-dx, -dz);
+      ped.pos.x += (dx / d) * speed * dt;
+      ped.pos.z += (dz / d) * speed * dt;
     }
-    const nx = ped.x + mx * speed * dt;
-    const nz = ped.z + mz * speed * dt;
-    const resolved = resolveBuilding(colliders, ped.x, ped.z, nx, nz, 0.5);
-    ped.x = resolved.x; ped.z = resolved.z;
-    if (mx !== 0 || mz !== 0) ped.angle = Math.atan2(mx, mz);
-    ped.mesh.position.set(ped.x, 0, ped.z);
-    ped.mesh.rotation.y = ped.angle;
-    const swing = Math.sin(ped.walkPhase) * (ped.state === 'flee' ? 0.7 : 0.4);
-    ped.mesh.userData.legL.rotation.x = swing;
-    ped.mesh.userData.legR.rotation.x = -swing;
+    ped.swing += dt * speed * 3.2;
+    const s = Math.sin(ped.swing) * 0.55;
+    ped.legL.rotation.x = s;
+    ped.legR.rotation.x = -s;
+    ped.armL.rotation.x = -s * 0.7;
+    ped.armR.rotation.x = s * 0.7;
+    ped.group.rotation.y = ped.yaw;
   }
 }
 
-export function spawnCop(scene, x, z) {
-  const mesh = makePersonMesh(0x1c2f4a, 0xe0ac69, true);
-  mesh.position.set(x, 0, z);
-  scene.add(mesh);
-  return {
-    mesh, x, z, angle: 0, speed: 5.4, name: 'Officer', state: 'chase',
-    panic: 0, walkPhase: 0, targetX: x, targetZ: z, health: 60, isCop: true, dead: false,
+// Officers chase the player directly. Within 2.4 m they grab, building
+// an arrest timer; 2.2 s of contact means BUSTED.
+export function updateOfficers(people, dt, playerPos, onArrest) {
+  for (const off of people.officers) {
+    if (off.dead) continue;
+    const dx = playerPos.x - off.pos.x;
+    const dz = playerPos.z - off.pos.z;
+    const d = Math.hypot(dx, dz);
+    if (d > 0.01) {
+      off.yaw = Math.atan2(-dx, -dz);
+      off.pos.x += (dx / d) * off.speed * dt;
+      off.pos.z += (dz / d) * off.speed * dt;
+    }
+    off.swing += dt * off.speed * 3;
+    const s = Math.sin(off.swing) * 0.6;
+    off.legL.rotation.x = s;
+    off.legR.rotation.x = -s;
+    off.armL.rotation.x = -s * 0.7;
+    off.armR.rotation.x = s * 0.7;
+    off.group.rotation.y = off.yaw;
+    if (d < 2.4) {
+      off.arrestT += dt;
+      if (off.arrestT >= CFG.arrestGrabTime) {
+        off.arrestT = 0;
+        onArrest();
+      }
+    } else {
+      off.arrestT = Math.max(0, off.arrestT - dt * 2);
+    }
+  }
+}
+
+export { nearestRoad };
+
+// A carjacked driver runs away on foot: a fresh pedestrian at the car
+// who panics and flees from the spot.
+export function spawnFleeingPed(scene, rng, people, x, z) {
+  const { group, armL, armR, legL, legR, torso } = buildFigure({
+    shirt: rng.pick(SHIRT_COLORS), skin: rng.pick(SKIN_TONES),
+    hat: rng.chance(0.5) ? 'hair' : 'cap', isOfficer: false,
+  });
+  group.position.set(x, 0, z);
+  scene.add(group);
+  const ped = {
+    group, armL, armR, legL, legR, torso,
+    pos: group.position,
+    yaw: rng.range(0, Math.PI * 2),
+    speed: rng.range(1, 2),
+    target: { x: x + rng.range(-40, 40), z: z + rng.range(-40, 40) },
+    panic: 3,
+    panicT: 3,
+    health: 100,
+    name: rng.pick(PED_NAMES),
+    swing: 0,
+    dead: false,
   };
-}
-
-export function updateCops(cops, dt, player, colliders, onArrest) {
-  for (const cop of cops) {
-    if (cop.dead) continue;
-    cop.walkPhase += dt * 8;
-    const dx = player.x - cop.x;
-    const dz = player.z - cop.z;
-    const dist = Math.hypot(dx, dz);
-    if (dist < 0.01) continue;
-    const mx = dx / dist; const mz = dz / dist;
-    const nx = cop.x + mx * cop.speed * dt;
-    const nz = cop.z + mz * cop.speed * dt;
-    const resolved = resolveBuilding(colliders, cop.x, cop.z, nx, nz, 0.5);
-    cop.x = resolved.x; cop.z = resolved.z;
-    cop.angle = Math.atan2(mx, mz);
-    cop.mesh.position.set(cop.x, 0, cop.z);
-    cop.mesh.rotation.y = cop.angle;
-    const swing = Math.sin(cop.walkPhase) * 0.6;
-    cop.mesh.userData.legL.rotation.x = swing;
-    cop.mesh.userData.legR.rotation.x = -swing;
-    if (dist < 2.4) onArrest(cop, dt);
-  }
+  torso.userData.pedRef = ped;
+  people.peds.push(ped);
+  return ped;
 }

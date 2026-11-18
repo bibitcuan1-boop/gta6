@@ -1,137 +1,200 @@
-// HUD and minimap: every DOM readout plus the round top-down minimap canvas.
-// The HUD never owns game state — it only renders what main hands it each frame.
-import { districtAt, CITY_HALF, roadCentres } from './config.js';
-import { wantedLabel } from './police.js';
+// HUD: plain DOM over the canvas, plus the round minimap drawn on a
+// 2D canvas. All elements are the ids the page shell provides.
+import { ROADS, districtAt } from './config.js';
 
-export function createHud() {
+export function createHud(G) {
   const $ = (id) => document.getElementById(id);
-  const els = {
-    cash: $('cash'), health: $('healthFill'), armor: $('armorFill'),
-    wanted: $('wanted'), clock: $('clock'), objective: $('objective'),
-    banner: $('banner'), dialogue: $('dialogue'), crosshair: $('crosshair'),
-    toast: $('toast'), speedo: $('speedo'), weapon: $('weapon'),
-    hint: $('hint'), minimap: $('minimap'), status: $('status'),
-    title: $('screenTitle'), pause: $('screenPause'), busted: $('screenBusted'),
-    wasted: $('screenWasted'), done: $('screenDone'), saveInfo: $('saveInfo'),
+  const el = {
+    cash: $('cash'),
+    healthFill: $('healthFill'),
+    armorFill: $('armorFill'),
+    wanted: $('wanted'),
+    clock: $('clock'),
+    objective: $('objective'),
+    banner: $('banner'),
+    dialogue: $('dialogue'),
+    crosshair: $('crosshair'),
+    toast: $('toast'),
+    speedo: $('speedo'),
+    weapon: $('weapon'),
+    minimap: $('minimap'),
+    hint: $('hint'),
+    status: $('status'),
+    hud: $('hud'),
   };
-  let bannerTimer = null;
-  let dialogueTimer = null;
-  let toastTimer = null;
+  const mm = el.minimap ? el.minimap.getContext('2d') : null;
+  let bannerT = 0;
+  let dialogueT = 0;
+  let toastT = 0;
+  let visible = true;
 
-  function show(el, on) { if (el) el.style.display = on ? '' : 'none'; }
+  function fmtTime(hours) {
+    const h = Math.floor(hours) % 24;
+    const m = Math.floor((hours % 1) * 60);
+    const hh = ((h + 11) % 12) + 1;
+    const ap = h < 12 ? 'AM' : 'PM';
+    return `${hh}:${String(m).padStart(2, '0')} ${ap}`;
+  }
 
-  return {
-    els,
-    banner(text) {
-      els.banner.textContent = text;
-      show(els.banner, true);
-      clearTimeout(bannerTimer);
-      bannerTimer = setTimeout(() => show(els.banner, false), 2600);
+  const H = {
+    setStars(n) {
+      if (!el.wanted) return;
+      let s = '';
+      for (let i = 0; i < 5; i += 1) s += i < n ? '★' : '☆';
+      el.wanted.textContent = s;
+      el.wanted.style.opacity = n > 0 ? '1' : '0.35';
     },
-    say(who, text) {
-      els.dialogue.innerHTML = `<span class="who">${who}:</span> ${text.replace(/^[^:]*:\s*/, '')}`;
-      show(els.dialogue, true);
-      clearTimeout(dialogueTimer);
-      dialogueTimer = setTimeout(() => show(els.dialogue, false), 6000);
+    setObjective(text) {
+      if (el.objective) el.objective.textContent = text;
+    },
+    banner(text) {
+      if (!el.banner) return;
+      el.banner.textContent = text;
+      el.banner.style.opacity = '1';
+      bannerT = 2.5;
+      this.announce(text);
+    },
+    dialogue(name, line) {
+      if (!el.dialogue) return;
+      el.dialogue.innerHTML = `<b>${name}</b> — ${line}`;
+      el.dialogue.style.opacity = '1';
+      dialogueT = 6;
+      this.announce(`${name}: ${line}`);
     },
     toast(text) {
-      els.toast.textContent = text;
-      show(els.toast, true);
-      clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => show(els.toast, false), 3200);
+      if (!el.toast) return;
+      el.toast.textContent = text;
+      el.toast.style.opacity = '1';
+      toastT = 3;
     },
-    announce(text) { els.status.textContent = text; },
-    setScreen(name) {
-      show(els.title, name === 'title');
-      show(els.pause, name === 'pause');
-      show(els.busted, name === 'busted');
-      show(els.wasted, name === 'wasted');
-      show(els.done, name === 'done');
+    announce(text) {
+      if (el.status) el.status.textContent = text;
     },
-    render(game, dt) {
-      const p = game.player;
-      els.cash.textContent = `$${Math.floor(p.cash).toLocaleString('en-US')}`;
-      els.health.style.width = `${Math.max(0, p.health)}%`;
-      els.armor.style.width = `${Math.max(0, p.armor)}%`;
-      const stars = game.wanted.stars;
-      els.wanted.innerHTML = stars > 0
-        ? `<span>${'★'.repeat(stars)}</span><span class="dim">${'★'.repeat(5 - stars)}</span>`
-        : `<span class="dim">☆☆☆☆☆</span>`;
-      const hours = Math.floor(game.dayTime) % 24;
-      const mins = Math.floor((game.dayTime % 1) * 60);
-      const hh = String(hours).padStart(2, '0');
-      const mm = String(mins).padStart(2, '0');
-      els.clock.textContent = `${hh}:${mm}  •  ${districtAt(p.x, p.z)}  •  ${game.mission.completedCount}/4 jobs done`;
-      els.objective.innerHTML = `<b>MISSION</b> — ${game.objectiveText}`;
-      show(els.crosshair, game.screen === 'play' && !p.car);
-      if (p.car) {
-        const kmh = Math.round(Math.abs(p.car.speed) * 3.6);
-        els.speedo.innerHTML = `<span class="big">${kmh}</span> km/h<br>${p.car.name}<br><span style="color:#ffd23e">E — exit car</span>`;
-      } else {
-        els.speedo.innerHTML = '';
+    toggle() {
+      visible = !visible;
+      if (el.hud) el.hud.style.display = visible ? '' : 'none';
+      return visible;
+    },
+    get isVisible() { return visible; },
+
+    update(G, dt) {
+      const p = G.player;
+      if (bannerT > 0) {
+        bannerT -= dt;
+        if (bannerT <= 0 && el.banner) el.banner.style.opacity = '0';
       }
-      els.weapon.innerHTML = p.car ? '' : `${game.combat.weapon === 'fists' ? 'Fists' : game.combat.weapon.toUpperCase()} — ${game.combat.ammo} / ${game.combat.reserve} &nbsp;•&nbsp; R reload`;
-      els.hint.innerHTML = p.car
-        ? 'W/S drive &nbsp;•&nbsp; A/D steer &nbsp;•&nbsp; E exit &nbsp;•&nbsp; C camera &nbsp;•&nbsp; P pause'
-        : 'WASD move &nbsp;•&nbsp; SHIFT run &nbsp;•&nbsp; E steal car &nbsp;•&nbsp; CLICK shoot &nbsp;•&nbsp; F punch &nbsp;•&nbsp; N next job';
-      this.drawMinimap(game);
+      if (dialogueT > 0) {
+        dialogueT -= dt;
+        if (dialogueT <= 0 && el.dialogue) el.dialogue.style.opacity = '0';
+      }
+      if (toastT > 0) {
+        toastT -= dt;
+        if (toastT <= 0 && el.toast) el.toast.style.opacity = '0';
+      }
+      if (el.cash) el.cash.textContent = `$${Math.floor(p.cash)}`;
+      if (el.healthFill) el.healthFill.style.width = `${Math.max(0, p.health)}%`;
+      if (el.armorFill) el.armorFill.style.width = `${Math.max(0, p.armor)}%`;
+      if (el.clock) {
+        const district = districtAt(p.inCar && p.car ? p.car.pos.x : p.pos.x, p.inCar && p.car ? p.car.pos.z : p.pos.z);
+        el.clock.textContent = `${fmtTime(G.timeHours)} · ${district} · Jobs ${G.missions.doneCount}/4`;
+      }
+      if (el.crosshair) {
+        el.crosshair.style.display = (!p.inCar && G.mode === 'playing') ? 'block' : 'none';
+      }
+      if (el.speedo) {
+        if (p.inCar && p.car) {
+          const kmh = Math.round(Math.abs(p.car.speed) * 3.6);
+          el.speedo.innerHTML = `${kmh}<span> km/h</span><br><small>${p.car.name}</small>`;
+        } else {
+          el.speedo.innerHTML = '';
+        }
+      }
+      if (el.weapon) {
+        if (!p.inCar) {
+          const wname = p.weapon === 'fists' ? 'Fists' : p.weapon === 'pistol' ? 'P9 Pistol' : 'VK-9 SMG';
+          el.weapon.textContent = p.weapon === 'fists' ? wname : `${wname}  ${p.mag} / ${p.reserve}`;
+        } else {
+          el.weapon.textContent = '';
+        }
+      }
+      if (el.hint) {
+        el.hint.textContent = p.inCar
+          ? 'W/S drive · A/D steer · E exit · C camera · P pause · H hide HUD'
+          : 'WASD move · Shift run · Space jump · E enter car · 1 fists · 2 pistol · 3 SMG · R reload · N job · P pause · H hide HUD';
+      }
+      this.drawMinimap(G);
     },
-    drawMinimap(game) {
-      const cv = els.minimap;
-      const g = cv.getContext('2d');
+
+    drawMinimap(G) {
+      if (!mm || !el.minimap) return;
       const S = 168;
-      const scale = S / (CITY_HALF * 2 + 90);
+      const scale = S / 480; // world -240..240 maps onto the disc
       const toMap = (x, z) => [S / 2 + x * scale, S / 2 + z * scale];
-      g.clearRect(0, 0, S, S);
-      g.fillStyle = '#0e2438';
-      g.fillRect(0, 0, S, S);
-      // Sea at the bottom edge.
-      g.fillStyle = '#1f7fa8';
-      const [, seaY] = toMap(0, CITY_HALF + 10);
-      g.fillRect(0, seaY, S, S - seaY);
-      // Roads.
-      g.strokeStyle = '#5a6b7d';
-      g.lineWidth = 4;
-      const centres = roadCentres();
-      for (const c of centres) {
-        const [x1, y1] = toMap(c, -CITY_HALF - 20);
-        const [x2, y2] = toMap(c, CITY_HALF + 20);
-        g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke();
-        const [ax1, ay1] = toMap(-CITY_HALF - 20, c);
-        const [ax2, ay2] = toMap(CITY_HALF + 20, c);
-        g.beginPath(); g.moveTo(ax1, ay1); g.lineTo(ax2, ay2); g.stroke();
+      mm.clearRect(0, 0, S, S);
+      mm.save();
+      mm.beginPath();
+      mm.arc(S / 2, S / 2, S / 2, 0, Math.PI * 2);
+      mm.clip();
+      // Dark blue background, sea at the bottom edge.
+      mm.fillStyle = '#0e2a4a';
+      mm.fillRect(0, 0, S, S);
+      mm.fillStyle = '#2f7fc8';
+      const [, seaY] = toMap(0, 210);
+      mm.fillRect(0, seaY, S, S - seaY);
+      // Roads as grey lines.
+      mm.strokeStyle = '#7d838c';
+      mm.lineWidth = 5;
+      for (const r of ROADS) {
+        const [x1] = toMap(r, 0);
+        mm.beginPath(); mm.moveTo(x1, 0); mm.lineTo(x1, S); mm.stroke();
+        const [, z1] = toMap(0, r);
+        mm.beginPath(); mm.moveTo(0, z1); mm.lineTo(S, z1); mm.stroke();
       }
-      const dot = (x, z, color, r) => {
-        const [mx, my] = toMap(x, z);
-        g.fillStyle = color;
-        g.beginPath(); g.arc(mx, my, r, 0, Math.PI * 2); g.fill();
-      };
-      // Mission marker.
-      const target = game.missionTarget;
-      if (target) dot(target.x, target.z, '#ffd23e', 6);
-      // Traffic (grey), police (blue/red), player (white arrow).
-      for (const car of game.cars) {
-        if (car.isPolice) continue;
-        dot(car.x, car.z, '#9fb8cc', 2);
+      // Mission target as a gold dot.
+      const stage = G.missions.currentStage();
+      if (stage && stage.x !== undefined) {
+        const [mx, mz] = toMap(stage.x, stage.z);
+        mm.fillStyle = '#ffd21a';
+        mm.beginPath(); mm.arc(mx, mz, 5, 0, Math.PI * 2); mm.fill();
       }
-      for (const car of game.wanted.policeCars) dot(car.x, car.z, '#ff4444', 3);
-      for (const cop of game.wanted.cops) if (!cop.dead) dot(cop.x, cop.z, '#4488ff', 2);
-      const [px, py] = toMap(game.player.x, game.player.z);
-      g.save();
-      g.translate(px, py);
-      g.rotate(game.player.angle);
-      g.fillStyle = '#ffffff';
-      g.strokeStyle = '#111';
-      g.lineWidth = 1;
-      g.beginPath();
-      g.moveTo(0, -7); g.lineTo(5, 6); g.lineTo(-5, 6); g.closePath();
-      g.fill(); g.stroke();
-      g.restore();
-      // North tick.
-      g.fillStyle = '#fff';
-      g.font = 'bold 11px Arial';
-      g.fillText('N', S / 2 - 4, 12);
-      void wantedLabel;
+      // Traffic grey, police red, officers blue.
+      mm.fillStyle = '#b9bec6';
+      for (const car of G.cars.traffic) {
+        const [x, z] = toMap(car.pos.x, car.pos.z);
+        mm.fillRect(x - 1.5, z - 1.5, 3, 3);
+      }
+      mm.fillStyle = '#ff3333';
+      for (const car of G.cars.police) {
+        const [x, z] = toMap(car.pos.x, car.pos.z);
+        mm.beginPath(); mm.arc(x, z, 3, 0, Math.PI * 2); mm.fill();
+      }
+      mm.fillStyle = '#3b7dd8';
+      for (const off of G.people.officers) {
+        if (off.dead) continue;
+        const [x, z] = toMap(off.pos.x, off.pos.z);
+        mm.beginPath(); mm.arc(x, z, 2.5, 0, Math.PI * 2); mm.fill();
+      }
+      // The player: a white arrow that rotates with facing.
+      const p = G.player;
+      const px = p.inCar && p.car ? p.car.pos.x : p.pos.x;
+      const pz = p.inCar && p.car ? p.car.pos.z : p.pos.z;
+      const yaw = p.inCar && p.car ? p.car.yaw : p.yaw;
+      const [mx, mz] = toMap(px, pz);
+      mm.save();
+      mm.translate(mx, mz);
+      mm.rotate(-yaw);
+      mm.fillStyle = '#ffffff';
+      mm.beginPath();
+      mm.moveTo(0, -7); mm.lineTo(5, 5); mm.lineTo(-5, 5); mm.closePath();
+      mm.fill();
+      mm.restore();
+      // North at the top.
+      mm.fillStyle = '#ffffff';
+      mm.font = 'bold 11px system-ui, sans-serif';
+      mm.textAlign = 'center';
+      mm.fillText('N', S / 2, 12);
+      mm.restore();
     },
   };
+  return H;
 }

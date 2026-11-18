@@ -1,86 +1,116 @@
-// Staged screenshot scenes behind ?shot=<name>.
-// Each one drives the real game into a fixed, readable state and paints it twice,
-// then sets window.__shotReady so the screenshot tool knows the frame is done.
-// ?shot=start  title screen over the city at golden hour
-// ?shot=drive  Jax driving a Comet GT down the Strip, HUD + minimap live
-// ?shot=chase  three-star police chase with sirens and a roadblock feel
-// ?shot=mission  Job 2 in progress: the package marker, timer and objective on screen
-import { MISSIONS } from './config.js';
-import { addWanted, spawnPoliceCar } from './police.js';
-import { startMission } from './missions.js';
+// Staged screenshot scenes behind ?shot=start|drive|chase|mission.
+// Each drives the real game into a fixed readable state, paints it
+// twice, and sets window.__shotReady so a screenshot tool knows the
+// frame is done. The three play scenes first let traffic and
+// pedestrians settle for ninety simulated 1/60 s steps; before the
+// first paint the camera is stepped forward eighty times at 1/60 s so
+// it converges on its target instead of showing a wide view from spawn.
+import { CFG } from './config.js';
+import { snapCamera, updateCamera } from './player.js';
 
-export function stageShot(name, game) {
-  const g = game;
-  g.screen = 'play';
-  g.hud.setScreen('none');
+function putPlayerInCar(G, car, x, z, yaw, speed) {
+  car.parked = false;
+  car.traffic = null;
+  car.pos.set(x, 0, z);
+  car.yaw = yaw;
+  car.speed = speed;
+  car.group.rotation.y = yaw;
+  G.player.inCar = true;
+  G.player.car = car;
+  G.player.group.visible = false;
+  G.player.pos.set(x, 0, z);
+  G.player.yaw = yaw;
+}
+
+function settleWorld(G) {
+  for (let i = 0; i < 90; i += 1) G.stepWorld(1 / 60, true);
+}
+
+function convergeCamera(G) {
+  for (let i = 0; i < 80; i += 1) updateCamera(G, 1 / 60);
+  snapCamera(G);
+}
+
+export function stageShot(G, name) {
+  const p = G.player;
   if (name === 'start') {
-    g.screen = 'title';
-    g.hud.setScreen('title');
-    g.player.x = -40; g.player.z = 60;
-    g.player.camYaw = Math.PI * 0.85;
-    g.camera.position.set(-40, 26, 120);
-    g.camera.lookAt(0, 12, 0);
-    return { screen: 'title' };
+    // Title screen over the city at golden hour.
+    G.timeHours = 17.5;
+    p.pos.set(-40, 0, 60);
+    p.yaw = Math.PI * 0.75;
+    p.inCar = false;
+    p.car = null;
+    p.group.visible = true;
+    G.mode = 'title';
+    G.showScreen('title');
+    const a = 0.6;
+    G.camera.position.set(Math.cos(a) * 150, 62, Math.sin(a) * 150);
+    G.camera.lookAt(0, 18, 0);
+    return;
   }
-  // The three play shots share a live, populated street.
-  g.player.cash = 2450;
-  g.player.health = 86;
-  g.player.armor = 40;
+
+  // The three play scenes run the real game.
+  G.mode = 'playing';
+  G.showScreen(null);
+  G.audio.unlock();
+
   if (name === 'drive') {
-    const car = g.cars.find((c) => !c.isTraffic && !c.isPolice);
-    if (car) {
-      car.x = -90; car.z = 30; car.angle = Math.PI; car.speed = 18;
-      g.player.car = car;
-      g.player.x = car.x; g.player.z = car.z;
-      g.player.mesh.visible = false;
-    }
-    g.objectiveText = 'Free roam — explore Palmera Bay. Press N to start Job 1: Borrowed Wheels.';
-    g.missionTarget = null;
-  } else if (name === 'chase') {
-    const car = g.cars.find((c) => !c.isTraffic && !c.isPolice);
-    if (car) {
-      car.x = 30; car.z = -90; car.angle = 0; car.speed = 24;
-      g.player.car = car;
-      g.player.x = car.x; g.player.z = car.z;
-      g.player.mesh.visible = false;
-    }
-    addWanted(g.wanted, 3, 'shot');
-    // Three interceptors in frame on the same road, closing from behind.
-    const p1 = spawnPoliceCar(g.scene, g.wanted, 30, -90, { range: () => 0 });
-    p1.x = 30; p1.z = -108; p1.angle = 0; p1.speed = 26;
-    const p2 = spawnPoliceCar(g.scene, g.wanted, 30, -90, { range: () => 0 });
-    p2.x = 26; p2.z = -122; p2.angle = 0.1; p2.speed = 24;
-    const p3 = spawnPoliceCar(g.scene, g.wanted, 30, -90, { range: () => 0 });
-    p3.x = 34; p3.z = -135; p3.angle = -0.1; p3.speed = 22;
-    g.dayTime = 17.5;
-    g.objectiveText = 'WANTED ★★★ — lose the Bay PD! Outrun them or break line of sight.';
-    g.missionTarget = null;
-    g.hud.banner('WANTED — 3 STARS');
-  } else if (name === 'mission') {
-    // Start Job 2 for real, then jump its first stage forward to the timed delivery.
-    g.mission.index = 1;
-    startMission(g.mission, g.scene, g.hud);
-    g.mission.stage = 1;
-    g.mission.timer = 74;
-    g.mission.active = true;
-    const car = g.cars.find((c) => !c.isTraffic && !c.isPolice);
-    if (car) {
-      car.x = 90; car.z = -90; car.angle = Math.PI * 0.75; car.speed = 16;
-      g.player.car = car;
-      g.player.x = car.x; g.player.z = car.z;
-      g.player.mesh.visible = false;
-    }
-    const stage = MISSIONS[1].stages[1];
-    if (g.mission.marker) {
-      g.mission.marker.position.set(stage.target.x, 0, stage.target.z);
-      g.mission.marker.visible = true;
-    }
-    g.missionTarget = { x: stage.target.x, z: stage.target.z };
-    g.objectiveText = `Job 2 — The Package — Deliver the package to Old Town (74s left)`;
-    g.hud.say('Mia Torres', 'Mia: "The package is in the trunk. Old Town, 74 seconds — move, Jax!"');
+    const car = G.cars.parked[0];
+    putPlayerInCar(G, car, -90, 30, Math.PI, 18); // facing south
+    p.cash = 2450;
+    p.health = 86;
+    p.armor = 40;
+    G.missions.refreshObjective(G);
+    settleWorld(G);
+    G.timeHours = 9.5;
+    convergeCamera(G);
+    return;
   }
-  // Let traffic and pedestrians settle for a few simulated seconds so the street reads busy.
-  for (let i = 0; i < 90; i += 1) g.stepWorld(1 / 60, true);
-  g.hud.render(g, 0);
-  return { screen: 'play' };
+
+  if (name === 'chase') {
+    const car = G.cars.parked[1];
+    putPlayerInCar(G, car, 30, -90, Math.PI, 24); // facing south
+    G.timeHours = 17.5;
+    G.police.stars = 3;
+    G.hud.setStars(3);
+    G.missions.refreshObjective(G);
+    G.hud.setObjective('WANTED — 3 stars! Lose the Bay PD');
+    // Three police interceptors behind on the same road at
+    // increasing distances and slightly different angles and speeds.
+    // The nearest one sits just behind the player car, in front of
+    // the chase camera, so the chase reads in the frame.
+    const spots = [
+      { dx: 0, dz: -6, speed: 26 },
+      { dx: 5, dz: -18, speed: 22 },
+      { dx: -5, dz: -30, speed: 19 },
+    ];
+    spots.forEach((s, i) => {
+      const pc = G.policeSpawnCarForShot(30 + s.dx, -90 + s.dz, Math.PI + (i - 1) * 0.08, s.speed);
+      void pc;
+    });
+    settleWorld(G);
+    G.timeHours = 17.5;
+    convergeCamera(G);
+    return;
+  }
+
+  if (name === 'mission') {
+    // Job two, started for real, first stage jumped to the timed
+    // delivery with 74 seconds left.
+    G.missions.startJob(G, 1);
+    G.missions.stageIdx = 1;
+    G.missions.enterStage(G);
+    G.missions.timer = 74;
+    G.missions.refreshObjective(G);
+    const car = G.cars.parked[2];
+    putPlayerInCar(G, car, 90, -90, Math.PI, 16); // facing south
+    G.hud.dialogue('Mia Torres', 'Package is in the trunk. Old Town, fast — the buyer does not like waiting.');
+    settleWorld(G);
+    G.timeHours = 9.5;
+    convergeCamera(G);
+    return;
+  }
+
+  // Unknown shot name: fall back to the title scene.
+  stageShot(G, 'start');
 }

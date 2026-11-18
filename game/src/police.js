@@ -1,116 +1,170 @@
-// The wanted system: stars, police cars that chase and ram, officers on foot,
-// escape timers, and the busted / wasted endings.
-import * as THREE from 'three';
-import { POLICE, CITY_HALF } from './config.js';
-import { createCar } from './vehicles.js';
-import { spawnCop } from './people.js';
+// Wanted level and police: stars 0-5, police cars and foot officers
+// scaling with stars, chases, rams, arrests, escape and slow decay.
+import { CFG } from './config.js';
+import { forwardOf, makeCar } from './vehicles.js';
 
-export function createWanted() {
+export function createPolice() {
   return {
-    stars: 0, heat: 0, escapeTimer: 0, arrestTimer: 0,
-    policeCars: [], cops: [], spawnTimer: 0, lastSeen: 0,
+    stars: 0,
+    spawnT: 0,
+    escapeT: 0,
+    decayT: 0,
+    // Pure helper, also used by the headless tests.
+    policeCarTarget(stars) {
+      return Math.min(30, 14 + 3.5 * stars);
+    },
+    wantedCarCount(stars) {
+      return Math.min(5, 1 + stars);
+    },
+    wantedOfficerCount(stars) {
+      return stars >= 2 ? Math.min(4, stars) : 0;
+    },
+    addStar(G, n = 1) {
+      if (this.stars >= 5) return;
+      this.stars = Math.min(5, this.stars + n);
+      this.escapeT = 0;
+      if (G.hud) G.hud.setStars(this.stars);
+    },
+    clearStars(G, silent) {
+      this.stars = 0;
+      this.escapeT = 0;
+      if (G.hud) G.hud.setStars(0);
+      if (!silent && G.hud) G.hud.banner('YOU LOST THE COPS');
+    },
   };
 }
 
-export function addWanted(wanted, amount, reason) {
-  wanted.stars = Math.max(0, Math.min(POLICE.maxStars, wanted.stars + amount));
-  wanted.heat = Math.max(wanted.heat, wanted.stars * 20);
-  wanted.escapeTimer = 0;
-  return wanted.stars;
+function playerTarget(G) {
+  const p = G.player;
+  if (p.inCar && p.car) return { x: p.car.pos.x, z: p.car.pos.z };
+  return { x: p.pos.x, z: p.pos.z };
 }
 
-export function spawnPoliceCar(scene, wanted, px, pz, rng) {
-  const angle = rng.range(0, Math.PI * 2);
-  const x = px + Math.sin(angle) * 55;
-  const z = pz + Math.cos(angle) * 55;
-  const car = createCar(x, z, angle, 0xf2f2f2, 'Bay PD Interceptor', true, false);
+function spawnPoliceCar(G) {
+  const t = playerTarget(G);
+  const angle = Math.random() * Math.PI * 2;
+  const x = t.x + Math.cos(angle) * 55;
+  const z = t.z + Math.sin(angle) * 55;
+  const car = makeCar(G.scene, G.rng, true);
+  car.pos.set(Math.max(-220, Math.min(220, x)), 0, Math.max(-220, Math.min(220, z)));
+  car.yaw = Math.atan2(-(t.x - car.pos.x), -(t.z - car.pos.z));
   car.speed = 12;
-  scene.add(car.mesh);
-  wanted.policeCars.push(car);
+  G.cars.police.push(car);
+  G.cars.all.push(car);
   return car;
 }
 
-export function updateWanted(wanted, dt, scene, player, rng, events) {
-  const px = player.x; const pz = player.z;
-  const inCar = !!player.car;
-  // How many police units the stars demand.
-  const wantCars = wanted.stars >= 1 ? Math.min(1 + wanted.stars, 5) : 0;
-  const wantCops = wanted.stars >= 2 ? Math.min(wanted.stars, 4) : 0;
-  wanted.spawnTimer -= dt;
-  if (wanted.stars > 0 && wanted.spawnTimer <= 0) {
-    wanted.spawnTimer = 2.5;
-    if (wanted.policeCars.length < wantCars) spawnPoliceCar(scene, wanted, px, pz, rng);
-    if (wanted.cops.length < wantCops && !inCar) {
-      const a = rng.range(0, Math.PI * 2);
-      wanted.cops.push(spawnCop(scene, px + Math.sin(a) * 22, pz + Math.cos(a) * 22));
-    }
+function spawnOfficer(G) {
+  const t = playerTarget(G);
+  const angle = Math.random() * Math.PI * 2;
+  const x = t.x + Math.cos(angle) * 22;
+  const z = t.z + Math.sin(angle) * 22;
+  const off = G.people.spawnOfficer(G.scene, x, z);
+  G.people.officers.push(off);
+  return off;
+}
+
+export function updatePolice(G, dt) {
+  const P = G.police;
+  const cars = G.cars.police;
+  const officers = G.people.officers;
+
+  // Trim dead police cars / officers from the active lists.
+  for (let i = cars.length - 1; i >= 0; i -= 1) {
+    if (cars[i].wrecked) cars.splice(i, 1);
   }
-  // Police cars chase and ram.
-  for (const car of wanted.policeCars) {
-    const dx = px - car.x; const dz = pz - car.z;
-    const dist = Math.hypot(dx, dz);
-    const wantAngle = Math.atan2(dx, dz);
-    let diff = wantAngle - car.angle;
+  for (let i = officers.length - 1; i >= 0; i -= 1) {
+    if (officers[i].dead) officers.splice(i, 1);
+  }
+
+  if (P.stars <= 0) return;
+
+  // Spawn new units every 2.5 s until the wanted counts are met.
+  P.spawnT -= dt;
+  if (P.spawnT <= 0) {
+    P.spawnT = 2.5;
+    if (cars.length < P.wantedCarCount(P.stars)) spawnPoliceCar(G);
+    if (officers.length < P.wantedOfficerCount(P.stars)) spawnOfficer(G);
+  }
+
+  // Police cars chase: steer toward the player, ram within 4.2 m.
+  const t = playerTarget(G);
+  const targetSpeed = P.policeCarTarget(P.stars);
+  for (const car of cars) {
+    const dx = t.x - car.pos.x;
+    const dz = t.z - car.pos.z;
+    const d = Math.hypot(dx, dz);
+    const wantYaw = Math.atan2(-dx, -dz);
+    let diff = wantYaw - car.yaw;
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
-    car.angle += Math.max(-2.2 * dt, Math.min(2.2 * dt, diff));
-    const targetSpeed = Math.min(POLICE.chaseSpeed, 14 + wanted.stars * 3.5);
+    const turn = Math.max(-2.2 * dt, Math.min(2.2 * dt, diff));
+    car.yaw += turn;
     car.speed += (targetSpeed - car.speed) * Math.min(1, dt * 1.2);
-    car.x += Math.sin(car.angle) * car.speed * dt;
-    car.z += Math.cos(car.angle) * car.speed * dt;
-    car.x = Math.max(-CITY_HALF - 30, Math.min(CITY_HALF + 30, car.x));
-    car.z = Math.max(-CITY_HALF - 30, Math.min(CITY_HALF + 30, car.z));
-    car.mesh.position.set(car.x, 0, car.z);
-    car.mesh.rotation.y = car.angle;
-    // Flash the light bar.
-    const phase = Math.floor(performance.now() / 280) % 2 === 0;
-    const bar = car.mesh.getObjectByName('lightbar');
-    if (bar) bar.material.color.setHex(phase ? 0xff2222 : 0x2266ff);
-    // Ram the player's car or the player.
-    if (dist < 4.2) {
-      if (inCar && player.car) {
-        player.car.speed *= 0.82;
-        player.car.health -= 6 * dt * 10;
-        events.onRam(dt);
-      } else if (dist < 2.6) {
-        events.onRam(dt);
-      }
+    const f = forwardOf(car.yaw);
+    car.pos.x += f.x * car.speed * dt;
+    car.pos.z += f.z * car.speed * dt;
+    car.group.rotation.y = car.yaw;
+    for (const w of car.wheels) w.rotation.x += (car.speed * dt) / 0.38;
+    // Light bar flashes red and blue on a roughly quarter-second beat.
+    car.flashT += dt;
+    const on = Math.floor(car.flashT / 0.25) % 2 === 0;
+    if (car.group.userData.lampRed) {
+      car.group.userData.lampRed.material.color.setHex(on ? 0xff2222 : 0x441111);
+      car.group.userData.lampBlue.material.color.setHex(on ? 0x111144 : 0x2244ff);
     }
-    // Nearest police distance drives the escape timer.
-    wanted.lastSeen = dist;
+    if (d < 4.2) {
+      // Ram: heavy damage to the player's car, or damage on foot.
+      if (G.player.inCar && G.player.car) {
+        G.player.car.health -= 18 * dt * 4;
+        G.player.car.speed *= 0.92;
+        if (G.player.car.health <= 0) G.combat.wreckCar(G, G.player.car);
+      } else {
+        G.combat.damagePlayer(G, 12 * dt * 4);
+      }
+      car.speed *= 0.7;
+    }
   }
-  // Escape: no police unit within lose distance for loseTime seconds.
+
+  // Escape: if no police unit is within 95 m for 9 continuous seconds,
+  // the stars clear. At one star the heat also decays slowly out of sight.
+  const t2 = playerTarget(G);
   let nearest = Infinity;
-  for (const car of wanted.policeCars) nearest = Math.min(nearest, Math.hypot(car.x - px, car.z - pz));
-  for (const cop of wanted.cops) if (!cop.dead) nearest = Math.min(nearest, Math.hypot(cop.x - px, cop.z - pz));
-  if (wanted.stars > 0) {
-    if (nearest > POLICE.loseDistance) {
-      wanted.escapeTimer += dt;
-      if (wanted.escapeTimer >= POLICE.loseTime) {
-        wanted.stars = 0;
-        wanted.escapeTimer = 0;
-        events.onEscaped();
-        clearPolice(scene, wanted);
-      }
-    } else {
-      wanted.escapeTimer = 0;
+  for (const car of cars) {
+    nearest = Math.min(nearest, Math.hypot(car.pos.x - t2.x, car.pos.z - t2.z));
+  }
+  for (const off of officers) {
+    nearest = Math.min(nearest, Math.hypot(off.pos.x - t2.x, off.pos.z - t2.z));
+  }
+  if (nearest > CFG.escapeRadius) {
+    P.escapeT += dt;
+    if (P.escapeT >= CFG.escapeTime) {
+      P.clearStars(G);
+      if (G.missions) G.missions.onEscape();
     }
+  } else {
+    P.escapeT = 0;
   }
-  // Wanted decays slowly when the player stays out of sight at 1 star.
-  if (wanted.stars === 1) {
-    wanted.heat -= dt * 1.2;
-    if (wanted.heat <= 0) { wanted.stars = 0; events.onEscaped(); clearPolice(scene, wanted); }
+  if (P.stars === 1 && nearest > CFG.escapeRadius) {
+    P.decayT += dt;
+    if (P.decayT >= 20) {
+      P.decayT = 0;
+      P.clearStars(G);
+      if (G.missions) G.missions.onEscape();
+    }
+  } else {
+    P.decayT = 0;
   }
-  return nearest;
 }
 
-export function clearPolice(scene, wanted) {
-  for (const car of wanted.policeCars) scene.remove(car.mesh);
-  for (const cop of wanted.cops) scene.remove(cop.mesh);
-  wanted.policeCars = [];
-  wanted.cops = [];
-}
-
-export function wantedLabel(stars) {
-  return '★'.repeat(stars) + '☆'.repeat(Math.max(0, 5 - stars));
+// Remove every police unit (arrest, death, mission reset).
+export function clearAllPolice(G) {
+  for (const car of G.cars.police) {
+    G.scene.remove(car.group);
+    const i = G.cars.all.indexOf(car);
+    if (i >= 0) G.cars.all.splice(i, 1);
+  }
+  G.cars.police.length = 0;
+  for (const off of G.people.officers) G.scene.remove(off.group);
+  G.people.officers.length = 0;
 }
